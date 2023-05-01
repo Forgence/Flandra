@@ -23,12 +23,24 @@ jobs:
       working-directory: ./src
       run: go test -v ./...
 
+    - name: Get the date
+      id: date
+      run: echo "::set-output name=date::$(date +'%Y%m%d%H%M%S')"
+      shell: bash
+
     - name: Build executables
-      working-directory: ./src
+      uses: actions/setup-go@v2
+      with:
+        go-version: 1.20.2
       run: |
-        GOOS=windows GOARCH=amd64 go build -o ./flandra-windows-amd64.exe
-        GOOS=darwin GOARCH=amd64 go build -o ./flandra-darwin-amd64
-        GOOS=linux GOARCH=amd64 go build -o ./flandra-linux-amd64
+        GOOS=${{ matrix.os }} GOARCH=amd64 go build -o ./src/flandra-${{ matrix.os }}-amd64${{ matrix.extension }}
+      working-directory: ./src
+      strategy:
+        matrix:
+          os: [windows, darwin, linux]
+          include:
+            - os: windows
+              extension: .exe
 
     - name: Create GitHub Release
       id: create_release
@@ -36,37 +48,17 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
-        tag_name: ${{ github.ref }}
-        release_name: Flandra Release ${{ github.ref }}
+        tag_name: ${{ steps.date.outputs.date }}
+        release_name: Flandra Release ${{ steps.date.outputs.date }}
         draft: false
         prerelease: false
 
-    - name: Upload Windows Asset
+    - name: Upload Assets
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ steps.create_release.outputs.upload_url }}
-        asset_path: ./src/flandra-windows-amd64.exe
-        asset_name: flandra-windows-amd64.exe
-        asset_content_type: application/octet-stream
-
-    - name: Upload macOS Asset
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ steps.create_release.outputs.upload_url }}
-        asset_path: ./src/flandra-darwin-amd64
-        asset_name: flandra-darwin-amd64
-        asset_content_type: application/octet-stream
-
-    - name: Upload Linux Asset
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ steps.create_release.outputs.upload_url }}
-        asset_path: ./src/flandra-linux-amd64
-        asset_name: flandra-linux-amd64
+        asset_path: ./src/flandra-${{ matrix.os }}-amd64${{ matrix.extension }}
+        asset_name: flandra-${{ matrix.os }}-amd64${{ matrix.extension }}
         asset_content_type: application/octet-stream
