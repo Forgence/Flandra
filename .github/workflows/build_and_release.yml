@@ -47,7 +47,7 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ steps.create_release.outputs.upload_url }}
-        asset_path: ./flandra-windows-amd64.exe
+        asset_path: ./src/flandra-windows-amd64.exe
         asset_name: flandra-windows-amd64.exe
         asset_content_type: application/octet-stream
 
@@ -57,7 +57,7 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ steps.create_release.outputs.upload_url }}
-        asset_path: ./flandra-darwin-amd64
+        asset_path: ./src/flandra-darwin-amd64
         asset_name: flandra-darwin-amd64
         asset_content_type: application/octet-stream
 
@@ -67,6 +67,6 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ steps.create_release.outputs.upload_url }}
-        asset_path: ./flandra-linux-amd64
+        asset_path: ./src/flandra-linux-amd64
         asset_name: flandra-linux-amd64
         asset_content_type: application/octet-stream
