@@ -9,6 +9,19 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [windows, darwin, linux]
+        include:
+          - os: windows
+            extension: .exe
+            asset_content_type: application/vnd.microsoft.portable-executable
+          - os: darwin
+            extension: ""
+            asset_content_type: application/octet-stream
+          - os: linux
+            extension: ""
+            asset_content_type: application/octet-stream
 
     steps:
     - name: Check out code
@@ -29,18 +42,9 @@ jobs:
       shell: bash
 
     - name: Build executables
-      uses: actions/setup-go@v2
-      with:
-        go-version: 1.20.2
       run: |
         GOOS=${{ matrix.os }} GOARCH=amd64 go build -o ./src/flandra-${{ matrix.os }}-amd64${{ matrix.extension }}
       working-directory: ./src
-      strategy:
-        matrix:
-          os: [windows, darwin, linux]
-          include:
-            - os: windows
-              extension: .exe
 
     - name: Create GitHub Release
       id: create_release
@@ -61,4 +65,4 @@ jobs:
         upload_url: ${{ steps.create_release.outputs.upload_url }}
         asset_path: ./src/flandra-${{ matrix.os }}-amd64${{ matrix.extension }}
         asset_name: flandra-${{ matrix.os }}-amd64${{ matrix.extension }}
-        asset_content_type: application/octet-stream
+        asset_content_type: ${{ matrix.asset_content_type }}
