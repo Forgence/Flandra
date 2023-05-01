@@ -1,0 +1,254 @@
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"flag"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/printer"
+	"go/token"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+var extractionFuncs = map[string]func(string, bool, bool, bool) (string, error){
+	".go": extractGo,
+	// ".rs": extractRust,
+	// ".cs": extractCSharp,
+	// ".py": extractPython,
+	// ".sh": extractShellScript,
+}
+
+type FileCode struct {
+	Filename string
+	Code     string
+}
+
+func main() {
+	// Define flags
+	var (
+		dir            string
+		subDirs        bool
+		size           int64
+		fileType       string
+		modifiedSince  string
+		extractFuncs   bool
+		extractImports bool
+		extractGlobals bool
+		outFile        string
+	)
+
+	flag.StringVar(&dir, "dir", ".", "Define the directory in which to begin or default to the current directory")
+	flag.BoolVar(&subDirs, "subDirs", false, "Allow a flag to go into subDirs or not if looking at the whole dir")
+	flag.Int64Var(&size, "size", 0, "Filter based on file size (in bytes), default to no size filter")
+	flag.StringVar(&fileType, "type", "", "Filter based on file type, default to no type filter")
+	flag.StringVar(&modifiedSince, "modified", "", "Filter based on last modified time, default to no time filter")
+	flag.BoolVar(&extractFuncs, "extractFuncs", true, "If set, function declarations will be extracted")
+	flag.BoolVar(&extractImports, "extractImports", true, "If set, import statements will be extracted")
+	flag.BoolVar(&extractGlobals, "extractGlobals", true, "If set, global variable declarations will be extracted")
+	flag.StringVar(&outFile, "out", "output.txt", "Output file to write the combined code, default to output.txt")
+
+	flag.Parse()
+
+	// Walk the file system
+	files, err := walkFileSystem(dir, subDirs, size, fileType, modifiedSince)
+	if err != nil {
+		fmt.Println("Error walking file system:", err)
+		os.Exit(1)
+	}
+
+	// Extract code from the files
+	codes, err := extractCode(files, extractFuncs, extractImports, extractGlobals)
+	if err != nil {
+		fmt.Println("Error extracting code:", err)
+		os.Exit(1)
+	}
+
+	// Write the code to the output file
+	err = writeOutput(codes, outFile)
+	if err != nil {
+		fmt.Println("Error writing output:", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("Successfully combined code into", outFile)
+}
+
+func walkFileSystem(dir string, subDirs bool, size int64, fileType string, modifiedSince string) ([]string, error) {
+	// Parse the modifiedSince string into a time.Time
+	var modTime time.Time
+	var err error
+	if modifiedSince != "" {
+		modTime, err = time.Parse(time.RFC3339, modifiedSince)
+		if err != nil {
+			return nil, fmt.Errorf("invalid time format for -modified: %v", err)
+		}
+	}
+
+	var files []string
+	err = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		// If subDirs is false and this is a directory other than the starting directory, skip it
+		if !subDirs && info.IsDir() && path != dir {
+			return filepath.SkipDir
+		}
+		// Skip if this is a directory
+		if info.IsDir() {
+			return nil
+		}
+		// Check file size
+		if info.Size() < size {
+			return nil
+		}
+		// Check file type
+		if fileType != "" && filepath.Ext(path) != fileType {
+			return nil
+		}
+		// Check last modified time
+		if !modTime.IsZero() && info.ModTime().Before(modTime) {
+			return nil
+		}
+
+		files = append(files, path)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return files, nil
+}
+
+func extractCode(files []string, extractFuncs, extractImports, extractGlobals bool) ([]FileCode, error) {
+	var codes []FileCode
+	for _, file := range files {
+		// Read the file
+		content, err := os.ReadFile(file)
+		if err != nil {
+			return nil, fmt.Errorf("error reading file %s: %v", file, err)
+		}
+
+		// Determine the extraction function based on the file type
+		ext := filepath.Ext(file)
+		extractionFunc, ok := extractionFuncs[ext]
+		if !ok {
+			// Skip files with unsupported extensions
+			fmt.Printf("Skipping file with unsupported extension: %s\n", file)
+			continue
+		}
+
+		// Extract the code
+		code, err := extractionFunc(string(content), extractFuncs, extractImports, extractGlobals)
+		if err != nil {
+			return nil, fmt.Errorf("error extracting code from file %s: %v", file, err)
+		}
+
+		codes = append(codes, FileCode{Filename: file, Code: code})
+	}
+	return codes, nil
+}
+
+func extractGo(content string, extractFuncs, extractImports, extractGlobals bool) (string, error) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "", content, 0)
+	if err != nil {
+		return "", fmt.Errorf("error parsing Go code: %v", err)
+	}
+
+	var buf strings.Builder
+	if extractImports {
+		for _, imp := range f.Imports {
+			buf.WriteString("import ")
+			buf.WriteString(imp.Path.Value)
+			buf.WriteString("\n")
+		}
+	}
+
+	if extractGlobals {
+		for _, decl := range f.Decls {
+			switch d := decl.(type) {
+			case *ast.GenDecl:
+				if d.Tok == token.VAR {
+					buf.WriteString("var ")
+					for _, spec := range d.Specs {
+						switch s := spec.(type) {
+						case *ast.ValueSpec:
+							for _, name := range s.Names {
+								buf.WriteString(name.Name)
+								buf.WriteString(" ")
+							}
+							printer.Fprint(&buf, fset, s.Type)
+							buf.WriteString("\n")
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if extractFuncs {
+		for _, decl := range f.Decls {
+			if fn, isFn := decl.(*ast.FuncDecl); isFn {
+				buf.WriteString("func ")
+				buf.WriteString(fn.Name.Name)
+				buf.WriteString(formatParams(fn.Type.Params))
+				buf.WriteString(" {\n")
+				// Here we're not extracting the body of the function
+				buf.WriteString("}\n")
+			}
+		}
+	}
+
+	return buf.String(), nil
+}
+
+func formatParams(params *ast.FieldList) string {
+	var buf strings.Builder
+	buf.WriteString("(")
+	for i, param := range params.List {
+		if i > 0 {
+			buf.WriteString(", ")
+		}
+		for j, name := range param.Names {
+			if j > 0 {
+				buf.WriteString(", ")
+			}
+			buf.WriteString(name.Name)
+		}
+		buf.WriteString(" ")
+		var typeBuf bytes.Buffer
+		printer.Fprint(&typeBuf, token.NewFileSet(), param.Type)
+		buf.WriteString(typeBuf.String())
+	}
+	buf.WriteString(")")
+	return buf.String()
+}
+
+func writeOutput(codes []FileCode, outFile string) error {
+	// Open the output file for writing
+	file, err := os.Create(outFile)
+	if err != nil {
+		return fmt.Errorf("error creating output file: %v", err)
+	}
+	defer file.Close()
+
+	writer := bufio.NewWriter(file)
+	for _, filecode := range codes {
+		// Write the file name and code to the output file
+		_, err := writer.WriteString(fmt.Sprintf("'''%s\n%s\n'''\n", filecode.Filename, filecode.Code))
+		if err != nil {
+			return fmt.Errorf("error writing to output file: %v", err)
+		}
+	}
+
+	// Make sure everything gets written to the file
+	writer.Flush()
+
+	return nil
+}
