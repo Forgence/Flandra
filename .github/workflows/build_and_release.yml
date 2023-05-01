@@ -4,24 +4,10 @@ on:
   push:
     branches:
       - main
-  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        os: [windows, darwin, linux]
-        include:
-          - os: windows
-            extension: .exe
-            asset_content_type: application/vnd.microsoft.portable-executable
-          - os: darwin
-            extension: ""
-            asset_content_type: application/octet-stream
-          - os: linux
-            extension: ""
-            asset_content_type: application/octet-stream
 
     steps:
     - name: Check out code
@@ -36,18 +22,16 @@ jobs:
       working-directory: ./src
       run: go test -v ./...
 
-    - name: Get the date
-      id: date
-      run: echo "::set-output name=date::$(date +'%Y%m%d%H%M%S')"
-      shell: bash
-
     - name: Build executables
-      run: |
-        GOOS=${{ matrix.os }} GOARCH=amd64 go build -o ./src/flandra-${{ matrix.os }}-amd64${{ matrix.extension }}
       working-directory: ./src
+      run: |
+        GOOS=windows GOARCH=amd64 go build -o ../flandra-windows-amd64.exe
+        GOOS=darwin GOARCH=amd64 go build -o ../flandra-darwin-amd64
+        GOOS=linux GOARCH=amd64 go build -o ../flandra-linux-amd64
 
-    - name: List files in ./src
-      run: ls -l ./src
+    - name: Get current datetime
+      id: current_time
+      run: echo "::set-output name=current_time::$(date +'%Y-%m-%dT%H-%M-%S')"
 
     - name: Create GitHub Release
       id: create_release
@@ -55,17 +39,38 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
-        tag_name: ${{ steps.date.outputs.date }}
-        release_name: Flandra Release ${{ steps.date.outputs.date }}
+        tag_name: flandra-${{ steps.current_time.outputs.current_time }}
+        release_name: Flandra Release ${{ steps.current_time.outputs.current_time }}
+        body: Release of Flandra version ${{ steps.current_time.outputs.current_time }}
         draft: false
         prerelease: false
 
-    - name: Upload Assets
+    - name: Upload Windows Asset
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ steps.create_release.outputs.upload_url }}
-        asset_path: ./flandra-${{ matrix.os }}-amd64${{ matrix.extension }}
-        asset_name: flandra-${{ matrix.os }}-amd64${{ matrix.extension }}
-        asset_content_type: ${{ matrix.asset_content_type }}
+        asset_path: ./flandra-windows-amd64.exe
+        asset_name: flandra-windows-amd64.exe
+        asset_content_type: application/octet-stream
+
+    - name: Upload macOS Asset
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: ./flandra-darwin-amd64
+        asset_name: flandra-darwin-amd64
+        asset_content_type: application/octet-stream
+
+    - name: Upload Linux Asset
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: ./flandra-linux-amd64
+        asset_name: flandra-linux-amd64
+        asset_content_type: application/octet-stream
