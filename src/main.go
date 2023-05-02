@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"flag"
 	"fmt"
 	"go/ast"
@@ -13,9 +14,11 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/sashabaranov/go-openai"
 )
 
-var extractionFuncs = map[string]func(string, bool, bool, bool) (string, error){
+var extractionFuncs = map[string]func(string, bool, bool, bool, bool) (string, error){
 	".go": extractGo,
 	// ".rs": extractRust,
 	// ".cs": extractCSharp,
@@ -31,15 +34,16 @@ type FileCode struct {
 func main() {
 	// Define flags
 	var (
-		dir            string
-		subDirs        bool
-		size           int64
-		fileType       string
-		modifiedSince  string
-		extractFuncs   bool
-		extractImports bool
-		extractGlobals bool
-		outFile        string
+		dir              string
+		subDirs          bool
+		size             int64
+		fileType         string
+		modifiedSince    string
+		extractFuncs     bool
+		extractImports   bool
+		extractGlobals   bool
+		generateComments bool
+		outFile          string
 	)
 
 	flag.StringVar(&dir, "dir", ".", "Define the directory in which to begin or default to the current directory")
@@ -51,6 +55,7 @@ func main() {
 	flag.BoolVar(&extractImports, "extractImports", true, "If set, import statements will be extracted")
 	flag.BoolVar(&extractGlobals, "extractGlobals", true, "If set, global variable declarations will be extracted")
 	flag.StringVar(&outFile, "out", "output.txt", "Output file to write the combined code, default to output.txt")
+	flag.BoolVar(&generateComments, "generateComments", false, "If set, comments will be generated for functions")
 
 	flag.Parse()
 
@@ -62,14 +67,14 @@ func main() {
 	}
 
 	// Extract code from the files
-	codes, err := extractCode(files, extractFuncs, extractImports, extractGlobals)
+	codes, err := extractCode(files, extractFuncs, extractImports, extractGlobals, generateComments)
 	if err != nil {
 		fmt.Println("Error extracting code:", err)
 		os.Exit(1)
 	}
 
 	// Write the code to the output file
-	err = writeOutput(codes, outFile)
+	err = writeOutput(codes, outFile, generateComments)
 	if err != nil {
 		fmt.Println("Error writing output:", err)
 		os.Exit(1)
@@ -125,7 +130,7 @@ func walkFileSystem(dir string, subDirs bool, size int64, fileType string, modif
 	return files, nil
 }
 
-func extractCode(files []string, extractFuncs, extractImports, extractGlobals bool) ([]FileCode, error) {
+func extractCode(files []string, extractFuncs, extractImports, extractGlobals, generateComments bool) ([]FileCode, error) {
 	var codes []FileCode
 	for _, file := range files {
 		// Read the file
@@ -144,7 +149,7 @@ func extractCode(files []string, extractFuncs, extractImports, extractGlobals bo
 		}
 
 		// Extract the code
-		code, err := extractionFunc(string(content), extractFuncs, extractImports, extractGlobals)
+		code, err := extractionFunc(string(content), extractFuncs, extractImports, extractGlobals, generateComments)
 		if err != nil {
 			return nil, fmt.Errorf("error extracting code from file %s: %v", file, err)
 		}
@@ -154,7 +159,7 @@ func extractCode(files []string, extractFuncs, extractImports, extractGlobals bo
 	return codes, nil
 }
 
-func extractGo(content string, extractFuncs, extractImports, extractGlobals bool) (string, error) {
+func extractGo(content string, extractFuncs, extractImports, extractGlobals, generateComments bool) (string, error) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "", content, 0)
 	if err != nil {
@@ -199,7 +204,13 @@ func extractGo(content string, extractFuncs, extractImports, extractGlobals bool
 				buf.WriteString(fn.Name.Name)
 				buf.WriteString(formatParams(fn.Type.Params))
 				buf.WriteString(" {\n")
-				// Here we're not extracting the body of the function
+				if generateComments {
+					comment, err := generateComment(fn.Name.Name + formatParams(fn.Type.Params))
+					if err != nil {
+						return "", err
+					}
+					buf.WriteString("// " + comment + "\n")
+				}
 				buf.WriteString("}\n")
 			}
 		}
@@ -230,7 +241,7 @@ func formatParams(params *ast.FieldList) string {
 	return buf.String()
 }
 
-func writeOutput(codes []FileCode, outFile string) error {
+func writeOutput(codes []FileCode, outFile string, generateComments bool) error {
 	// Open the output file for writing
 	file, err := os.Create(outFile)
 	if err != nil {
@@ -251,4 +262,41 @@ func writeOutput(codes []FileCode, outFile string) error {
 	writer.Flush()
 
 	return nil
+}
+
+func generateComment(code string) (string, error) {
+	/*apiKey := os.Getenv("OPENAI_API_KEY") // Read the API key from the environment variable
+	if apiKey == "" {
+		return "", fmt.Errorf("API key not found")
+	}*/
+
+	c := openai.NewClient("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") // Create a new client and the key is already invalid. :p
+	ctx := context.Background()
+
+	// Add a prompt that makes it clear that the model should generate a comment for a function
+	prompt := "Generate a descriptive comment for the following Go function:\n\n" + code
+
+	req := openai.ChatCompletionRequest{
+		Model:            openai.GPT4,
+		Messages:         []openai.ChatCompletionMessage{{Role: "system", Content: "You are a helpful assistant that describes code. Do not use // or any other identifier."}, {Role: "user", Content: prompt}},
+		MaxTokens:        256,
+		Temperature:      0.5,
+		N:                0,
+		Stream:           false,
+		Stop:             []string{},
+		PresencePenalty:  0,
+		FrequencyPenalty: 0,
+		LogitBias:        map[string]int{},
+		User:             "",
+	}
+	resp, err := c.CreateChatCompletion(ctx, req)
+	if err != nil {
+		return "", err
+	}
+
+	// Surround the generated comment with /* and */
+	//comment := "/* " + resp.Choices[0].Message.Content + " */"
+	comment := resp.Choices[0].Message.Content
+
+	return comment, nil // return the generated text
 }
