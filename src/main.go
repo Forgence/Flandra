@@ -18,7 +18,7 @@ import (
 	"github.com/sashabaranov/go-openai"
 )
 
-var extractionFuncs = map[string]func(string, bool, bool, bool, bool) (string, error){
+var extractionFuncs = map[string]func(string, bool, bool, bool, bool, string) (string, error){
 	".go": extractGo,
 	// ".rs": extractRust,
 	// ".cs": extractCSharp,
@@ -44,6 +44,7 @@ func main() {
 		extractGlobals   bool
 		generateComments bool
 		outFile          string
+		apiKey           string
 	)
 
 	flag.StringVar(&dir, "dir", ".", "Define the directory in which to begin or default to the current directory")
@@ -56,8 +57,17 @@ func main() {
 	flag.BoolVar(&extractGlobals, "extractGlobals", true, "If set, global variable declarations will be extracted")
 	flag.StringVar(&outFile, "out", "output.txt", "Output file to write the combined code, default to output.txt")
 	flag.BoolVar(&generateComments, "generateComments", false, "If set, comments will be generated for functions")
+	flag.StringVar(&apiKey, "apiKey", "", "OpenAI API key")
 
 	flag.Parse()
+
+	if apiKey == "" {
+		apiKey = os.Getenv("OPENAI_API_KEY")
+		if apiKey == "" {
+			fmt.Println("API key not provided. Set it via the -apiKey flag or the OPENAI_API_KEY environment variable.")
+			os.Exit(1)
+		}
+	}
 
 	// Walk the file system
 	files, err := walkFileSystem(dir, subDirs, size, fileType, modifiedSince)
@@ -67,7 +77,7 @@ func main() {
 	}
 
 	// Extract code from the files
-	codes, err := extractCode(files, extractFuncs, extractImports, extractGlobals, generateComments)
+	codes, err := extractCode(files, extractFuncs, extractImports, extractGlobals, generateComments, apiKey)
 	if err != nil {
 		fmt.Println("Error extracting code:", err)
 		os.Exit(1)
@@ -130,28 +140,19 @@ func walkFileSystem(dir string, subDirs bool, size int64, fileType string, modif
 	return files, nil
 }
 
-func extractCode(files []string, extractFuncs, extractImports, extractGlobals, generateComments bool) ([]FileCode, error) {
+func extractCode(files []string, extractFuncs, extractImports, extractGlobals, generateComments bool, apiKey string) ([]FileCode, error) {
 	var codes []FileCode
 	for _, file := range files {
 		// Read the file
-		content, err := os.ReadFile(file)
+		content, err := readFileContent(file)
 		if err != nil {
-			return nil, fmt.Errorf("error reading file %s: %v", file, err)
-		}
-
-		// Determine the extraction function based on the file type
-		ext := filepath.Ext(file)
-		extractionFunc, ok := extractionFuncs[ext]
-		if !ok {
-			// Skip files with unsupported extensions
-			fmt.Printf("Skipping file with unsupported extension: %s\n", file)
-			continue
+			return nil, err
 		}
 
 		// Extract the code
-		code, err := extractionFunc(string(content), extractFuncs, extractImports, extractGlobals, generateComments)
+		code, err := extractCodeFromFile(file, content, extractFuncs, extractImports, extractGlobals, generateComments, apiKey)
 		if err != nil {
-			return nil, fmt.Errorf("error extracting code from file %s: %v", file, err)
+			return nil, err
 		}
 
 		codes = append(codes, FileCode{Filename: file, Code: code})
@@ -159,7 +160,47 @@ func extractCode(files []string, extractFuncs, extractImports, extractGlobals, g
 	return codes, nil
 }
 
-func extractGo(content string, extractFuncs, extractImports, extractGlobals, generateComments bool) (string, error) {
+func readFileContent(file string) (string, error) {
+	content, err := os.ReadFile(file)
+	if err != nil {
+		return "", fmt.Errorf("error reading file %s: %v", file, err)
+	}
+
+	return string(content), nil
+}
+
+func extractCodeFromFile(file, content string, extractFuncs, extractImports, extractGlobals, generateComments bool, apiKey string) (string, error) {
+	// Declare and initialize buf and f
+	var buf strings.Builder
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "", content, 0)
+	if err != nil {
+		return "", fmt.Errorf("error parsing Go code: %v", err)
+	}
+
+	// Determine the extraction function based on the file type
+	ext := filepath.Ext(file)
+	extractionFunc, ok := extractionFuncs[ext]
+	if !ok {
+		// Skip files with unsupported extensions
+		fmt.Printf("Skipping file with unsupported extension: %s\n", file)
+		return "", nil
+	}
+
+	if extractFuncs {
+		extractFuncsFromAst(&buf, f, fset, generateComments, apiKey)
+	}
+
+	// Extract the code
+	code, err := extractionFunc(content, extractFuncs, extractImports, extractGlobals, generateComments, apiKey)
+	if err != nil {
+		return "", fmt.Errorf("error extracting code from file %s: %v", file, err)
+	}
+
+	return code, nil
+}
+
+func extractGo(content string, extractFuncs, extractImports, extractGlobals, generateComments bool, apiKey string) (string, error) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "", content, 0)
 	if err != nil {
@@ -167,56 +208,89 @@ func extractGo(content string, extractFuncs, extractImports, extractGlobals, gen
 	}
 
 	var buf strings.Builder
+
 	if extractImports {
-		for _, imp := range f.Imports {
-			buf.WriteString("import ")
-			buf.WriteString(imp.Path.Value)
-			buf.WriteString("\n")
-		}
+		extractImportsFromAst(&buf, f)
 	}
 
 	if extractGlobals {
-		for _, decl := range f.Decls {
-			switch d := decl.(type) {
-			case *ast.GenDecl:
-				if d.Tok == token.VAR {
-					buf.WriteString("var ")
-					for _, spec := range d.Specs {
-						switch s := spec.(type) {
-						case *ast.ValueSpec:
-							for _, name := range s.Names {
-								buf.WriteString(name.Name)
-								buf.WriteString(" ")
-							}
-							printer.Fprint(&buf, fset, s.Type)
-							buf.WriteString("\n")
-						}
-					}
-				}
-			}
-		}
+		extractGlobalsFromAst(&buf, f, fset)
 	}
 
 	if extractFuncs {
-		for _, decl := range f.Decls {
-			if fn, isFn := decl.(*ast.FuncDecl); isFn {
-				buf.WriteString("func ")
-				buf.WriteString(fn.Name.Name)
-				buf.WriteString(formatParams(fn.Type.Params))
-				buf.WriteString(" {\n")
-				if generateComments {
-					comment, err := generateComment(fn.Name.Name + formatParams(fn.Type.Params))
-					if err != nil {
-						return "", err
-					}
-					buf.WriteString("// " + comment + "\n")
-				}
-				buf.WriteString("}\n")
-			}
-		}
+		extractFuncsFromAst(&buf, f, fset, generateComments, apiKey)
 	}
 
 	return buf.String(), nil
+}
+
+func extractImportsFromAst(buf *strings.Builder, f *ast.File) {
+	for _, imp := range f.Imports {
+		buf.WriteString("import ")
+		buf.WriteString(imp.Path.Value)
+		buf.WriteString("\n")
+	}
+}
+
+func extractGlobalsFromAst(buf *strings.Builder, f *ast.File, fset *token.FileSet) {
+	for _, decl := range f.Decls {
+		switch d := decl.(type) {
+		case *ast.GenDecl:
+			if d.Tok == token.VAR {
+				buf.WriteString("var ")
+				for _, spec := range d.Specs {
+					switch s := spec.(type) {
+					case *ast.ValueSpec:
+						for _, name := range s.Names {
+							buf.WriteString(name.Name)
+							buf.WriteString(" ")
+						}
+						printer.Fprint(buf, fset, s.Type)
+						buf.WriteString("\n")
+					}
+				}
+			}
+		}
+	}
+}
+
+func extractFuncsFromAst(buf *strings.Builder, f *ast.File, fset *token.FileSet, generateComments bool, apiKey string) {
+	for _, decl := range f.Decls {
+		if fn, isFn := decl.(*ast.FuncDecl); isFn {
+			buf.WriteString("func ")
+			buf.WriteString(fn.Name.Name)
+			buf.WriteString(formatParams(fn.Type.Params))
+			buf.WriteString(formatResults(fn.Type.Results)) // Add this line to extract return types
+			buf.WriteString(" {\n")
+			if generateComments {
+				comment, err := generateComment(fn.Name.Name+formatParams(fn.Type.Params), apiKey)
+				if err != nil {
+					fmt.Printf("Error generating comment for function %s: %v\n", fn.Name.Name, err)
+				} else {
+					buf.WriteString("// " + comment + "\n")
+				}
+			}
+			buf.WriteString("}\n")
+		}
+	}
+}
+
+func formatResults(results *ast.FieldList) string {
+	if results == nil {
+		return ""
+	}
+	var buf strings.Builder
+	buf.WriteString(" (")
+	for i, result := range results.List {
+		if i > 0 {
+			buf.WriteString(", ")
+		}
+		var typeBuf bytes.Buffer
+		printer.Fprint(&typeBuf, token.NewFileSet(), result.Type)
+		buf.WriteString(typeBuf.String())
+	}
+	buf.WriteString(")")
+	return buf.String()
 }
 
 func formatParams(params *ast.FieldList) string {
@@ -264,13 +338,10 @@ func writeOutput(codes []FileCode, outFile string, generateComments bool) error 
 	return nil
 }
 
-func generateComment(code string) (string, error) {
-	/*apiKey := os.Getenv("OPENAI_API_KEY") // Read the API key from the environment variable
-	if apiKey == "" {
-		return "", fmt.Errorf("API key not found")
-	}*/
+func generateComment(code string, apiKey string) (string, error) {
+	c := openai.NewClient(apiKey)
 
-	c := openai.NewClient("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") // Create a new client and the key is already invalid. :p
+	// c := openai.NewClient("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") // Create a new client and the key is already invalid. :p
 	ctx := context.Background()
 
 	// Add a prompt that makes it clear that the model should generate a comment for a function
